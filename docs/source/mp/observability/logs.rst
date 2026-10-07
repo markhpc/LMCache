@@ -35,10 +35,10 @@ Key log messages:
 GC Monitoring (garbage-collection pauses)
 -----------------------------------------
 
-A full (generation-2) collection is stop-the-world and walks the whole
-heap, so it lands inside request handling as tail latency that nothing else
-in the server accounts for. Opt in to time collections and log the slow
-ones:
+A full (generation-2) collection walks the whole heap while the GIL is
+held, so a slow one can land inside request handling as tail latency that
+little else in the server attributes. Opt in to time collections and log
+the slow ones:
 
 .. code-block:: bash
 
@@ -53,9 +53,12 @@ Notes:
 - ``--gc-monitor-min-pause-ms`` (default ``1.0``) drops faster collections.
   ``0`` logs everything, including the sub-millisecond gen-0 sweeps CPython
   runs roughly every 700 net container allocations.
-- ``--gc-monitor-top-objects`` shows *what* the collector is walking, but
-  scans the whole generation on **every** collection (O(heap), can itself
-  cost hundreds of ms). Debugging only.
+- ``--gc-monitor-top-objects`` reports the N most common types among
+  generation-2 (old-generation) objects, not the entire heap a full
+  collection sweeps. Generations 0 and 1 are timed, never scanned; the
+  O(gen-2 heap) walk can itself cost hundreds of ms per full GC. A type
+  missing from the short top-``N`` list says nothing about whether it is
+  in the heap -- raise ``N`` (e.g. 20) when hunting one. Debugging only.
 - Non-zero ``uncollectable`` means CPython found garbage it could not free —
   a reference-cycle leak worth chasing.
 - The monitor logs directly instead of publishing events, so it is

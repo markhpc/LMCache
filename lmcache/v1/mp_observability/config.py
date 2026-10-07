@@ -238,10 +238,11 @@ def add_observability_args(
         "--gc-monitor-top-objects",
         type=int,
         default=0,
-        help="Include a breakdown of the N most common object types in each "
-        "logged collection. This walks the whole generation on EVERY "
-        "collection and can itself cost hundreds of milliseconds on a large "
-        "cache. Default is 0 (off); use only while debugging.",
+        help="Include a breakdown of the N most common object types among "
+        "generation-2 objects in each logged FULL (generation-2) "
+        "collection. Generations 0 and 1 are never enumerated. The walk "
+        "is O(gen-2 heap) and can itself cost hundreds of milliseconds "
+        "per full GC. Default is 0 (off); use only while debugging.",
     )
 
     extra_group = parser.add_argument_group(
