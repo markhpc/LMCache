@@ -9,7 +9,7 @@ two variants:
 
 | Adapter | Type name | Storage mode | Persist | Backends |
 |---|---|---|---|---|
-| `NixlStoreL2Adapter` | `nixl_store` | Static (pre-allocated files) | Not supported | GDS, GDS_MT, POSIX, HF3FS, OBJ, AZURE_BLOB |
+| `NixlStoreL2Adapter` | `nixl_store` | Static (pre-allocated files) | Not supported | GDS, GDS_MT, POSIX, HF3FS, OBJ, AZURE_BLOB, RADOS |
 | `DynamicNixlStoreL2Adapter` | `nixl_store_dynamic` | Dynamic (per-operation files) | Supported (default on) | GDS, GDS_MT, POSIX, HF3FS |
 
 The **static** adapter pre-allocates all storage files at init and registers
@@ -116,6 +116,37 @@ fixed-size pages of `align_bytes`. A memory object at address `addr` of size
 ```
 
 Both `addr` and `sz` must be multiples of `align_bytes`.
+
+---
+
+## RADOS (Ceph) Backend (Static Adapter Only)
+
+`RADOS` is accepted by the **static** `nixl_store` adapter and reuses the
+existing object-based path end to end; it is a static, local-only
+prototype.
+
+- **Routing.** `NixlStorageAgent` treats `RADOS` like `OBJ`/`AZURE_BLOB`:
+  `init_storage_handlers_object()` pre-allocates `pool_size` object slots
+  and registers them once as a Nixl `OBJ_SEG` list (key
+  `obj_<index>_<4hex>` per slot). Store/load then address those slots by
+  index exactly as the other object backends do.
+- **Parameters.** `backend_params` is forwarded to `create_backend()`
+  unchanged; LMCache does not interpret it. The NIXL RADOS plugin
+  requires non-empty `conf`, `name`, and `pool` keys and the NIXL
+  install must ship the RADOS plugin.
+- **Eviction and close do not delete RADOS objects.** `delete()` frees
+  the local slot index and `_memory_objects` entry only; `close()`
+  deregisters memory and releases Nixl handles. No RADOS remove is
+  ever issued, so written objects stay in the pool. Operators must
+  therefore use a dedicated, disposable pool and clean it up out of
+  band.
+- **Not persistent.** The key-to-slot mapping is in-memory only and is
+  rebuilt with fresh random object names on every start; nothing
+  survives a restart (`persist_enabled` does not apply here — see the
+  Persist / Secondary Lookup section).
+- **Scope.** The dynamic adapter (`nixl_store_dynamic`) does not support
+  `RADOS`; there are no direct Ceph bindings in LMCache — everything
+  goes through the Nixl plugin.
 
 ---
 

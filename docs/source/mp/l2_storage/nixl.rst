@@ -34,7 +34,7 @@ initialization.
 **Required fields:**
 
 - ``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``,
-  ``HF3FS``, ``OBJ``, ``AZURE_BLOB``.
+  ``HF3FS``, ``OBJ``, ``AZURE_BLOB``, ``RADOS``.
 - ``pool_size``: Number of storage descriptors to pre-allocate (must be > 0).
 
 **Backend-specific parameters (``backend_params``):**
@@ -44,7 +44,8 @@ File-based backends (``GDS``, ``GDS_MT``, ``POSIX``, ``HF3FS``) require:
 - ``file_path``: Directory path for storing L2 data.
 - ``use_direct_io``: ``"true"`` or ``"false"`` -- whether to use direct I/O.
 
-The ``OBJ`` and ``AZURE_BLOB`` backends (object stores) do not require ``file_path``.
+The ``OBJ``, ``AZURE_BLOB``, and ``RADOS`` backends (object stores) do not
+require ``file_path``.
 
 **Backend descriptions:**
 
@@ -67,6 +68,9 @@ The ``OBJ`` and ``AZURE_BLOB`` backends (object stores) do not require ``file_pa
      - Object store backend.  No local file path required.
    * - ``AZURE_BLOB``
      - Object store backend for Azure Blob Storage.  No local file path required.
+   * - ``RADOS``
+     - Ceph RADOS object-store backend via the NIXL RADOS plugin.  Static
+       object-slot mode only; see the RADOS notes below.
 
 **Configuration examples:**
 
@@ -89,6 +93,32 @@ The ``OBJ`` and ``AZURE_BLOB`` backends (object stores) do not require ``file_pa
 
     # AZURE_BLOB backend
     --l2-adapter '{"type": "nixl_store", "backend": "AZURE_BLOB", "backend_params": {"account_url": "https://<account_name>.blob.core.windows.net", "container_name": "<container_name>"}, "pool_size": 32}'
+
+    # RADOS backend (requires a NIXL install with the RADOS plugin)
+    --l2-adapter '{"type": "nixl_store", "backend": "RADOS", "backend_params": {"conf": "/etc/ceph/ceph.conf", "name": "client.lmcache", "pool": "lmcache-kv"}, "pool_size": 32}'
+
+**RADOS backend notes:**
+
+.. warning::
+
+   The ``RADOS`` backend on ``nixl_store`` is a static, local-only
+   prototype:
+
+   - It requires a NIXL build with the RADOS plugin available. The
+     ``backend_params`` must provide the plugin-required keys ``conf``
+     (readable Ceph configuration file), ``name`` (full Ceph entity
+     name, normally ``client.<id>``), and ``pool`` (the RADOS pool).
+     LMCache forwards ``backend_params`` to the NIXL RADOS plugin
+     unchanged and does not interpret or validate them.
+   - The cache is not persistent across restarts: the object-slot index
+     lives in memory only, and each start registers a fresh set of
+     randomly named objects.
+   - Logical eviction and adapter close only release local slot
+     bookkeeping and NIXL registrations. LMCache never deletes objects
+     from RADOS, so previously written objects remain in the pool.
+   - Because of the point above, point LMCache at a dedicated,
+     disposable RADOS pool managed by the operator, who is responsible
+     for cleaning up (or discarding) that pool out-of-band.
 
 Dynamic (persist / recover) — ``nixl_store_dynamic``
 ----------------------------------------------------

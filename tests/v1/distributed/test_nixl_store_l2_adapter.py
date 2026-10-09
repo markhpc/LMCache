@@ -43,6 +43,7 @@ from lmcache.v1.distributed.internal_api import (  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter import (  # noqa: E402
     NixlStoreL2Adapter,
     NixlStoreL2AdapterConfig,
+    NixlStorageAgent,
 )
 
 
@@ -1357,3 +1358,137 @@ class TestEvictionInterface:
         adpt.delete([key])
 
         assert listener.deleted == []
+
+
+# =============================================================================
+# RADOS Backend Tests (config + mocked agent; no live Ceph required)
+# =============================================================================
+
+_RADOS_BACKEND_PARAMS = {
+    "conf": "/etc/ceph/ceph.conf",
+    "name": "client.lmcache",
+    "pool": "lmcache-dev",
+}
+
+
+class TestRADOSBackendConfig:
+    """Config-level coverage for the RADOS backend.
+
+    These tests only exercise ``NixlStoreL2AdapterConfig`` parsing and
+    never contact a Ceph cluster.
+    """
+
+    def test_from_dict_accepts_rados(self):
+        """from_dict() should accept backend 'RADOS' and keep params intact."""
+        cfg = NixlStoreL2AdapterConfig.from_dict(
+            {
+                "type": "nixl_store",
+                "backend": "RADOS",
+                "backend_params": dict(_RADOS_BACKEND_PARAMS),
+                "pool_size": 8,
+            }
+        )
+
+        assert cfg.backend == "RADOS"
+        assert cfg.backend_params == _RADOS_BACKEND_PARAMS
+
+    def test_rados_does_not_require_file_params(self):
+        """RADOS specs without file_path/use_direct_io must parse."""
+        cfg = NixlStoreL2AdapterConfig(
+            backend="RADOS",
+            backend_params=dict(_RADOS_BACKEND_PARAMS),
+            pool_size=4,
+        )
+
+        assert "file_path" not in cfg.backend_params
+        assert "use_direct_io" not in cfg.backend_params
+
+    @pytest.mark.parametrize(
+        "misspelled",
+        ["RADOSX", "RADOS-DIRECT", "RADOSDIRECT", "rados", "rados_direct"],
+    )
+    def test_unknown_backend_still_rejected(self, misspelled):
+        """Near-miss backend names must not be accepted by the RADOS addition."""
+        with pytest.raises(ValueError, match="backend must be one of"):
+            NixlStoreL2AdapterConfig.from_dict(
+                {
+                    "type": "nixl_store",
+                    "backend": misspelled,
+                    "backend_params": dict(_RADOS_BACKEND_PARAMS),
+                    "pool_size": 4,
+                }
+            )
+
+    def test_rados_direct_is_rejected(self):
+        """'RADOS_DIRECT' is not a valid backend; only 'RADOS' is accepted."""
+        with pytest.raises(ValueError, match="backend must be one of"):
+            NixlStoreL2AdapterConfig.from_dict(
+                {
+                    "type": "nixl_store",
+                    "backend": "RADOS_DIRECT",
+                    "backend_params": dict(_RADOS_BACKEND_PARAMS),
+                    "pool_size": 4,
+                }
+            )
+
+    def test_help_documents_rados_keys(self):
+        """help() should mention RADOS and its required plugin keys."""
+        help_text = NixlStoreL2AdapterConfig.help()
+
+        assert "RADOS" in help_text
+        for key in ("conf", "name", "pool"):
+            assert key in help_text
+
+
+class TestRADOSStorageAgentRouting:
+    """Verify RADOS reuses the static object-slot (OBJ_SEG) path.
+
+    The NIXL agent is mocked, so no live Ceph cluster (and no RADOS-capable
+    NIXL plugin) is required.
+    """
+
+    def test_rados_forwards_params_and_uses_object_slots(self):
+        """RADOS must reach create_backend unchanged and register OBJ slots."""
+        params_before = dict(_RADOS_BACKEND_PARAMS)
+        pool_size = 8
+        l1_memory = L1MemoryDesc(
+            ptr=PAGE_SIZE,
+            size=PAGE_SIZE * NUM_BUFFER_PAGES,
+            align_bytes=PAGE_SIZE,
+        )
+
+        with patch(
+            "lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter.NixlAgent"
+        ) as agent_cls:
+            agent = NixlStorageAgent(
+                device="cpu",
+                backend="RADOS",
+                backend_params=dict(_RADOS_BACKEND_PARAMS),
+                pool_size=pool_size,
+                l1_memory_desc=l1_memory,
+            )
+
+        mock_agent = agent_cls.return_value
+
+        # The backend is created with the params forwarded unchanged.
+        mock_agent.create_backend.assert_called_once_with("RADOS", params_before)
+        assert _RADOS_BACKEND_PARAMS == params_before
+
+        # Object-based (OBJ_SEG) registration is used for storage...
+        reg_mem_types = [
+            kwargs.get("mem_type")
+            for _, kwargs in mock_agent.register_memory.call_args_list
+        ]
+        assert "OBJ" in reg_mem_types
+        # ... and no file-style registration happens on the RADOS path.
+        assert "FILE" not in reg_mem_types
+
+        prep_mem_types = [
+            kwargs.get("mem_type")
+            for _, kwargs in mock_agent.prep_xfer_dlist.call_args_list
+        ]
+        assert "OBJ" in prep_mem_types
+
+        # The pool holds one object slot per configured entry (static pool),
+        # not the per-file page expansion used by file backends.
+        assert agent.pool.total_objs == pool_size

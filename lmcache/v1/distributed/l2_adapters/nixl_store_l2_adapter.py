@@ -158,9 +158,12 @@ class NixlStorageAgent:
         Args:
             device: Device type of the L1 memory buffer (e.g. "cpu", "cuda").
             backend: Nixl storage backend to use. One of: GDS, GDS_MT, POSIX,
-                HF3FS (file-based) or OBJ, AZURE_BLOB (object-based).
+                HF3FS (file-based) or OBJ, AZURE_BLOB, RADOS (object-based).
             backend_params: Backend-specific parameters. File-based backends
-                require "file_path" and "use_direct_io" keys.
+                require "file_path" and "use_direct_io" keys. The RADOS
+                backend requires the "conf", "name", and "pool" keys defined
+                by the NIXL RADOS plugin; this adapter forwards
+                ``backend_params`` to Nixl unchanged.
             pool_size: Number of storage descriptor slots to pre-allocate.
             l1_memory_desc: Descriptor of the L1 memory buffer to register with Nixl
                 for data transfers.
@@ -200,7 +203,11 @@ class NixlStorageAgent:
                 use_direct_io=str(self.backend_params["use_direct_io"]).lower()
                 == "true",
             )
-        elif self.backend in ["OBJ", "AZURE_BLOB"]:
+        elif self.backend in ["OBJ", "AZURE_BLOB", "RADOS"]:
+            # RADOS (Ceph) reuses the static object-slot (OBJ_SEG) path:
+            # one pre-registered object key per pool slot, with the RADOS
+            # plugin parameters (conf, name, pool, ...) forwarded unchanged
+            # via create_backend() above.
             self.pool = NixlObjPool(num_total_objs=self.pool_size)
             self.init_storage_handlers_object(
                 page_size=l1_memory_desc.align_bytes,
@@ -937,6 +944,7 @@ _VALID_NIXL_BACKENDS = (
     "OBJ",
     "AZURE_BLOB",
     "IBM_SCALE",
+    "RADOS",
 )
 _FILE_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS", "IBM_SCALE")
 
@@ -947,13 +955,15 @@ class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
 
     Fields:
     - backend: Nixl storage backend
-      (GDS, GDS_MT, POSIX, HF3FS, OBJ, AZURE_BLOB).
+      (GDS, GDS_MT, POSIX, HF3FS, OBJ, AZURE_BLOB, RADOS).
     - backend_params: Backend-specific parameters as a
       dict of string key-value pairs. For file-based
       backends (GDS, GDS_MT, POSIX, HF3FS), must include
       ``file_path``. May also include ``use_direct_io``
       (default ``"false"``) and other backend-specific
-      keys.
+      keys. For RADOS, must include the NIXL RADOS
+      plugin keys ``conf``, ``name``, and ``pool``;
+      this adapter forwards them to Nixl unchanged.
     - pool_size: Number of storage descriptors to
       pre-allocate (must be > 0).
     """
@@ -1016,7 +1026,9 @@ class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
             "'use_direct_io' (default 'false') and "
             "'file_size' (int, size in bytes of each "
             "storage file slot; defaults to the L1 "
-            "page size if not set).\n"
+            "page size if not set). RADOS requires "
+            "the NIXL RADOS plugin keys 'conf', "
+            "'name', and 'pool'.\n"
             "- pool_size (int): number of storage "
             "descriptors to pre-allocate (required, "
             ">0)" % (_VALID_NIXL_BACKENDS,)
