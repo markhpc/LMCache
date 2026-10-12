@@ -2,7 +2,6 @@
 #pragma once
 
 #include <nixl.h>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -12,6 +11,7 @@
 #include <vector>
 
 #include "../connector_base.h"
+#include "reactor.h"
 #include "storage.h"
 
 namespace lmcache {
@@ -27,6 +27,9 @@ struct WorkerNixlContext {
   WorkerNixlContext(const WorkerNixlContext&) = delete;
   WorkerNixlContext& operator=(const WorkerNixlContext&) = delete;
 
+  // Unique among all concurrently live storage descriptors of this context.
+  uint64_t allocate_object_dev_id();
+
   std::string agent_name;
   std::unique_ptr<nixlAgent> agent;
   nixlBackendH* backend = nullptr;
@@ -34,6 +37,7 @@ struct WorkerNixlContext {
   nixl_reg_dlist_t l1_registration;
   bool l1_registered = false;
   std::unique_ptr<NixlStorageStrategy> storage;
+  uint64_t next_object_dev_id = 1;
 };
 
 class NixlConnector : public ConnectorBase<std::unique_ptr<WorkerNixlContext>> {
@@ -70,8 +74,31 @@ class NixlConnector : public ConnectorBase<std::unique_ptr<WorkerNixlContext>> {
                        const Request& request) override;
   void do_batch_delete(std::unique_ptr<WorkerNixlContext>& context,
                        const Request& request) override;
+  void worker_main(std::mutex& req_mu, std::condition_variable& req_cv,
+                   std::queue<Request>& requests) override;
 
  private:
+  // Adapts one worker context and its storage strategy to the reactor seam.
+  class WorkerReactorDriver final : public NixlReactorDriver {
+   public:
+    WorkerReactorDriver(NixlConnector& owner,
+                        std::unique_ptr<WorkerNixlContext>& context);
+    bool posts_tile(const Request& request) const override;
+    void execute_sync(const Request& request) override;
+    std::unique_ptr<NixlPendingOperation> prepare(
+        const Request& request) override;
+    std::unique_ptr<NixlPendingOperation> prepare_load_fallback(
+        const Request& request) override;
+    void log_load_error(const std::string& message) override;
+
+   private:
+    NixlConnector& owner_;
+    std::unique_ptr<WorkerNixlContext>& context_;
+  };
+
+  void run_reactor(std::unique_ptr<WorkerNixlContext>& context,
+                   std::mutex& req_mu, std::condition_variable& req_cv,
+                   std::queue<Request>& requests);
   std::vector<NixlTransferBuffer> validate_buffers(
       const Request& request) const;
   void validate_buffer(const void* buffer, size_t length) const;

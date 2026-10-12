@@ -96,6 +96,30 @@ order. FILE loads do not preflight individual paths: the caller queries first,
 supplies the correct destination lengths, and the complete tile succeeds or
 fails as one batch.
 
+### Serial and pending worker paths
+
+`pending_transfers` in the strategy capabilities selects the worker loop.
+Strategies without it (FILE) run the untouched serial `ConnectorBase` loop.
+The OBJECT strategy opts in by splitting its transfer into
+prepare/post/poll/finish (`NixlPendingOperation`), so one agent can hold
+several posted tiles; the connector's internal scheduler admits queued
+GET/SET tiles as they arrive, prepares each operation before posting it,
+polls every live tile each round-robin turn, and halts admission on stop.
+Shutdown and escaping exceptions drain every posted operation to terminal
+before propagating, and an operation is released before its tile leaves the
+active set. A tile completes exactly once; completions are suppressed once
+shutdown has begun.
+
+Pending OBJECT loads post all keys without a prior query (fast path). A
+terminal transfer failure fully releases the failed operation before one
+query-confirmed retry of the present subset; all-present is a logged
+all-false result, none-present completes all-false through an empty retry, a
+fallback query error fails the tile, and store failures never retry.
+Shutdown halts admission, drains posted tiles to terminal before NIXL
+resources are destroyed, and drops completions. The devIds of posted OBJECT
+descriptors come from a per-context allocator so concurrently live
+registrations never share one.
+
 ## FILE strategy
 
 `NixlFileStorage` is the reference `FILE_SEG` strategy, verified with the NIXL
@@ -190,9 +214,10 @@ one request.
 
 Store is an unconditional whole-object operation. It does not query first and
 does not attempt a conditional create because the NIXL 1.3 OBJ API exposes
-neither condition. Lookup uses `queryMem`. Load first queries to build a
-hit-only descriptor list; a transfer failure turns those selected keys into
-misses without corrupting unrelated buffers.
+neither condition. Lookup uses `queryMem`. The worker load path posts all keys
+without a prior query and falls back exactly once as described in "Serial and
+pending worker paths"; a failed load reports false per-key bits without
+corrupting unrelated buffers.
 
 NIXL 1.3 OBJ query returns existence but no content length. Exact remote length
 therefore cannot be validated before its ranged GET. The adapter always uses
